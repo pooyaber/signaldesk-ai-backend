@@ -9,6 +9,7 @@ from app.models import AnalyzeRequest, ScanRequest, TradingViewAlert
 from app.security import verify_webhook_token
 from app.services.analysis import analyze_symbol
 from app.services.chart_render import render_chart_dashboard
+from app.services.deep_analysis import get_deep_analysis
 from app.services.market_data import get_chart_data, get_fx_rate, search_symbols
 from app.services.storage import init_db, list_signals, save_analysis
 from app.services.telegram import notify_analysis
@@ -113,6 +114,11 @@ def chart(symbol: str = "AAPL", range: str = "6M") -> dict:
 @app.get("/symbols")
 def symbols(q: str = "", limit: int = 12) -> dict:
     return search_symbols(query=q, limit=limit)
+
+
+@app.get("/deep-analysis")
+def deep_analysis(symbol: str = "AAPL", currency: str = "USD", exchange: str | None = None, asset_type: str | None = None) -> dict:
+    return get_deep_analysis(symbol=symbol, currency=currency, exchange=exchange, asset_type=asset_type)
 
 
 @app.get("/fx")
