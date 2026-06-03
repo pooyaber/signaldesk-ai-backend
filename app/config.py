@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     webhook_secret: str = "change-me"
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1-mini"
+    twelve_data_api_key: str | None = None
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
     database_path: str = "signals.db"
