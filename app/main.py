@@ -1,16 +1,20 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, Query, Request
+import logging
+import time
+
+from fastapi import FastAPI, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.config import get_settings
-from app.models import AnalyzeRequest, ScanRequest, TradingViewAlert
+from app.models import AnalyzeRequest, AuthLoginRequest, AuthRegisterRequest, ScanRequest, TradingViewAlert
 from app.security import verify_webhook_token
 from app.services.analysis import analyze_symbol
+from app.services.auth import login_user, logout_user, register_user, user_from_token
 from app.services.chart_render import render_chart_dashboard
 from app.services.deep_analysis import get_deep_analysis
-from app.services.market_data import get_chart_data, get_fx_rate, search_symbols
+from app.services.market_data import cache_stats, get_chart_data, get_fx_rate, search_symbols
 from app.services.storage import init_db, list_signals, save_analysis
 from app.services.telegram import notify_analysis
 
@@ -21,6 +25,8 @@ app = FastAPI(
 )
 
 settings = get_settings()
+logger = logging.getLogger("signaldesk")
+_RATE_LIMIT_BUCKETS: dict[str, list[float]] = {}
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list(),
@@ -30,6 +36,44 @@ app.add_middleware(
 )
 
 
+
+@app.middleware("http")
+async def request_timer(request: Request, call_next):
+    started = time.perf_counter()
+    limit = max(0, int(settings.rate_limit_per_minute or 0))
+    if limit:
+        forwarded_for = request.headers.get("x-forwarded-for") or ""
+        client_ip = forwarded_for.split(",", 1)[0].strip() or (request.client.host if request.client else "unknown")
+        now = time.time()
+        window_start = now - 60
+        bucket = [stamp for stamp in _RATE_LIMIT_BUCKETS.get(client_ip, []) if stamp >= window_start]
+        if len(bucket) >= limit:
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "detail": "Too many requests. Please wait a moment and try again.",
+                    "retry_after_seconds": 60,
+                },
+            )
+        bucket.append(now)
+        _RATE_LIMIT_BUCKETS[client_ip] = bucket
+    try:
+        response = await call_next(request)
+    except Exception:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        logger.exception("request_failed path=%s method=%s elapsed_ms=%s", request.url.path, request.method, elapsed_ms)
+        raise
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    if response.status_code >= 400 or elapsed_ms > 2500:
+        logger.warning(
+            "request_complete path=%s method=%s status=%s elapsed_ms=%s",
+            request.url.path,
+            request.method,
+            response.status_code,
+            elapsed_ms,
+        )
+    return response
+
 @app.on_event("startup")
 def startup() -> None:
     init_db()
@@ -37,7 +81,50 @@ def startup() -> None:
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "environment": settings.app_env}
+    return {
+        "status": "ok",
+        "environment": settings.app_env,
+        "providers": {
+            "twelve_data": bool(settings.twelve_data_api_key),
+            "openai": bool(settings.openai_api_key),
+        },
+    }
+
+
+@app.get("/provider-status")
+def provider_status() -> dict:
+    return {
+        "status": "ok",
+        "environment": settings.app_env,
+        "providers": {
+            "market_data_primary": "twelve_data",
+            "twelve_data_configured": bool(settings.twelve_data_api_key),
+            "yahoo_fallback_enabled": True,
+            "openai_configured": bool(settings.openai_api_key),
+        },
+        "cache": cache_stats(),
+        "rate_limit_per_minute": settings.rate_limit_per_minute,
+    }
+
+
+@app.post("/auth/register")
+def auth_register(req: AuthRegisterRequest) -> dict:
+    return register_user(email=req.email, password=req.password, display_name=req.display_name)
+
+
+@app.post("/auth/login")
+def auth_login(req: AuthLoginRequest) -> dict:
+    return login_user(email=req.email, password=req.password)
+
+
+@app.get("/auth/me")
+def auth_me(authorization: str | None = Header(default=None)) -> dict:
+    return {"user": user_from_token(authorization)}
+
+
+@app.post("/auth/logout")
+def auth_logout(authorization: str | None = Header(default=None)) -> dict:
+    return logout_user(authorization)
 
 
 def save_analysis_safely(result) -> tuple[int | None, str | None]:
@@ -77,8 +164,19 @@ async def tradingview_webhook(
 
 @app.post("/analyze")
 def analyze(req: AnalyzeRequest) -> dict:
-    result = analyze_symbol(req.symbol, req.timeframe, include_ai=req.include_ai)
+    result = analyze_symbol(req.symbol, req.timeframe, include_ai=req.include_ai, display_currency=req.display_currency)
+    technicals = result.technicals
+    if technicals.last_price is None:
+        logger.warning(
+            "analysis_missing_price symbol=%s timeframe=%s mapped_symbol=%s notes=%s",
+            req.symbol,
+            req.timeframe,
+            technicals.mapped_symbol,
+            technicals.notes,
+        )
     signal_id, save_error = save_analysis_safely(result)
+    if save_error:
+        logger.warning("analysis_save_failed symbol=%s error=%s", req.symbol, save_error)
     return {"signal_id": signal_id, "save_error": save_error, "analysis": result}
 
 
@@ -108,12 +206,18 @@ def recent_signals(limit: int = 50, symbol: str | None = None) -> dict:
 
 @app.get("/chart")
 def chart(symbol: str = "AAPL", range: str = "6M") -> dict:
-    return get_chart_data(symbol=symbol, range_key=range)
+    result = get_chart_data(symbol=symbol, range_key=range)
+    if not result.get("points"):
+        logger.warning("chart_empty symbol=%s range=%s", symbol, range)
+    return result
 
 
 @app.get("/symbols")
 def symbols(q: str = "", limit: int = 12) -> dict:
-    return search_symbols(query=q, limit=limit)
+    result = search_symbols(query=q, limit=limit)
+    if q and not result.get("results"):
+        logger.warning("symbol_search_empty query=%s limit=%s", q, limit)
+    return result
 
 
 @app.get("/deep-analysis")
@@ -124,3 +228,5 @@ def deep_analysis(symbol: str = "AAPL", currency: str = "USD", exchange: str | N
 @app.get("/fx")
 def fx(base: str = "USD", quote: str = "EUR") -> dict:
     return get_fx_rate(base=base, quote=quote)
+
+
