@@ -654,6 +654,36 @@ def _search_market_rank(item: dict) -> int:
     return 4
 
 
+def _asset_type_rank(item: dict) -> int:
+    raw_type = str(item.get("type") or item.get("instrument_type") or "").upper()
+    symbol = str(item.get("symbol") or "").upper()
+    if symbol.endswith("-USD") or "/" in symbol:
+        return 0
+    if any(token in raw_type for token in ["COMMON STOCK", "EQUITY", "STOCK", "SHARE"]):
+        return 0
+    if any(token in raw_type for token in ["ETF", "ETC", "FUND"]):
+        return 1
+    if any(token in raw_type for token in ["INDEX", "FOREX", "CURRENCY", "CRYPTO", "DIGITAL"]):
+        return 2
+    if any(token in raw_type for token in ["COMMODITY", "FUTURE"]):
+        return 3
+    if any(token in raw_type for token in ["WARRANT", "CERTIFICATE", "OPTION", "TURBO", "KNOCK", "BOND", "NOTE", "RIGHT"]):
+        return 99
+    return 5
+
+
+def _is_search_result_allowed(item: dict, query: str) -> bool:
+    raw = query.strip()
+    symbol = str(item.get("symbol") or "").strip()
+    if not symbol:
+        return False
+    type_rank = _asset_type_rank(item)
+    if type_rank < 99:
+        return True
+    # If the user types the exact warrant/certificate ticker, allow it.
+    return bool(raw) and _compact(raw) == _compact(symbol)
+
+
 def _company_key(item: dict) -> str:
     raw = str(item.get("name") or item.get("symbol") or "").upper()
     cleanup_tokens = [
@@ -736,6 +766,8 @@ def _rank_and_dedupe_results(items: list[dict], limit: int, query: str = "") -> 
     for item in items:
         if not item.get("symbol"):
             continue
+        if not _is_search_result_allowed(item, query):
+            continue
         cleaned = {**item, "currency": _search_currency(item)}
         cleaned["name"] = _clean_asset_name(cleaned.get("name"), str(cleaned.get("symbol") or ""))
         enriched = with_logo(cleaned)
@@ -743,11 +775,11 @@ def _rank_and_dedupe_results(items: list[dict], limit: int, query: str = "") -> 
             continue
         key = _company_key(enriched)
         current = by_company.get(key)
-        if current is None or (_relevance_rank(enriched, query), _search_market_rank(enriched)) < (_relevance_rank(current, query), _search_market_rank(current)):
+        if current is None or (_relevance_rank(enriched, query), _asset_type_rank(enriched), _search_market_rank(enriched)) < (_relevance_rank(current, query), _asset_type_rank(current), _search_market_rank(current)):
             by_company[key] = enriched
     return sorted(
         by_company.values(),
-        key=lambda item: (_relevance_rank(item, query), _search_market_rank(item), str(item.get("symbol") or "")),
+        key=lambda item: (_relevance_rank(item, query), _asset_type_rank(item), _search_market_rank(item), str(item.get("symbol") or "")),
     )[:limit]
 
 
@@ -859,10 +891,11 @@ def search_symbols(query: str = "", limit: int = 12) -> dict:
             ranked = _rank_and_dedupe_results(twelve_results + fallback, max_results, clean)
             if ranked:
                 return _cache_set(cache_key, {"query": clean, "results": ranked, "source": "twelve_data", "fallback_used": False, "cache_ttl_seconds": CACHE_TTL_SECONDS["symbols"]})
+            twelve_error = "Twelve Data returned only derivative or low-relevance results."
+        else:
+            twelve_error = "Twelve Data returned no usable symbol results."
     except Exception as exc:
         twelve_error = str(exc)
-    else:
-        twelve_error = None
 
     yahoo = _search_symbols_yahoo(query, limit)
     yahoo["fallback_used"] = True
