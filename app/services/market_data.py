@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -52,6 +53,38 @@ CHART_RANGE_MAP = {
 }
 
 TWELVE_DATA_BASE_URL = "https://api.twelvedata.com"
+
+_MEMORY_CACHE: dict[str, tuple[float, object]] = {}
+CACHE_TTL_SECONDS = {
+    "symbols": 900,
+    "profile": 604800,
+    "quote": 60,
+    "technicals": 180,
+    "chart_intraday": 300,
+    "chart_daily": 1800,
+    "fx": 3600,
+}
+MAX_CACHE_ITEMS = 600
+
+
+def _cache_get(key: str, ttl_seconds: int):
+    item = _MEMORY_CACHE.get(key)
+    if not item:
+        return None
+    created_at, value = item
+    if time.time() - created_at > ttl_seconds:
+        _MEMORY_CACHE.pop(key, None)
+        return None
+    return value
+
+
+def _cache_set(key: str, value):
+    if len(_MEMORY_CACHE) > MAX_CACHE_ITEMS:
+        oldest_keys = sorted(_MEMORY_CACHE, key=lambda item: _MEMORY_CACHE[item][0])[:120]
+        for old_key in oldest_keys:
+            _MEMORY_CACHE.pop(old_key, None)
+    _MEMORY_CACHE[key] = (time.time(), value)
+    return value
 
 TWELVE_CHART_RANGE_MAP = {
     "1D": ("5min", 288),
@@ -540,24 +573,57 @@ def map_symbol(symbol: str) -> str:
 
 
 def get_asset_name(mapped_symbol: str) -> str:
-    if mapped_symbol in SYMBOL_PROFILES:
-        return SYMBOL_PROFILES[mapped_symbol]
+    clean_symbol = (mapped_symbol or "").strip().upper()
+    base_symbol = _base_logo_symbol(clean_symbol)
+    cache_key = f"profile:name:{clean_symbol}"
+    cached = _cache_get(cache_key, CACHE_TTL_SECONDS["profile"])
+    if cached is not None:
+        return cached
+    if clean_symbol in SYMBOL_PROFILES:
+        return _cache_set(cache_key, SYMBOL_PROFILES[clean_symbol])
+    if base_symbol in SYMBOL_PROFILES:
+        return _cache_set(cache_key, SYMBOL_PROFILES[base_symbol])
     try:
-        ticker = yf.Ticker(mapped_symbol)
-        info = ticker.info
-        return info.get("shortName") or info.get("longName") or mapped_symbol
+        payload = _twelve_get("quote", {"symbol": _twelve_symbol(clean_symbol)})
+        if isinstance(payload, dict):
+            name = _clean_asset_name(payload.get("name") or payload.get("instrument_name") or "", clean_symbol)
+            if name and name.upper() != clean_symbol:
+                return _cache_set(cache_key, name)
     except Exception:
-        return mapped_symbol
+        pass
+    try:
+        ticker = yf.Ticker(clean_symbol)
+        info = ticker.info
+        return _cache_set(cache_key, _clean_asset_name(info.get("longName") or info.get("shortName") or clean_symbol, clean_symbol))
+    except Exception:
+        return _cache_set(cache_key, clean_symbol)
 
 
 def get_quote_currency(mapped_symbol: str) -> str:
+    clean_symbol = (mapped_symbol or "").strip().upper()
+    cache_key = f"profile:currency:{clean_symbol}"
+    cached = _cache_get(cache_key, CACHE_TTL_SECONDS["profile"])
+    if cached is not None:
+        return cached
     try:
-        currency = yf.Ticker(mapped_symbol).fast_info.get("currency")
-        if currency:
-            return str(currency).upper()
+        payload = _twelve_get("quote", {"symbol": _twelve_symbol(clean_symbol)})
+        if isinstance(payload, dict):
+            currency = str(payload.get("currency") or "").upper()
+            if currency:
+                return _cache_set(cache_key, currency)
     except Exception:
         pass
-    return "USD"
+    try:
+        currency = yf.Ticker(clean_symbol).fast_info.get("currency")
+        if currency:
+            return _cache_set(cache_key, str(currency).upper())
+    except Exception:
+        pass
+    if clean_symbol.endswith(".DE") or clean_symbol.endswith(".F"):
+        return _cache_set(cache_key, "EUR")
+    if clean_symbol.endswith("-USD"):
+        return _cache_set(cache_key, "USD")
+    return _cache_set(cache_key, "USD")
 
 
 def _search_currency(item: dict) -> str:
@@ -590,9 +656,34 @@ def _search_market_rank(item: dict) -> int:
 
 def _company_key(item: dict) -> str:
     raw = str(item.get("name") or item.get("symbol") or "").upper()
-    for token in ["INCORPORATED", "CORPORATION", "COMPANY", "HOLDINGS", "LIMITED", "CLASS A", "CLASS B", "INC", "CORP", "LTD", "PLC", "AG"]:
-        raw = raw.replace(token, "")
+    cleanup_tokens = [
+        "INCORPORATED", "CORPORATION", "COMPANY", "HOLDINGS", "LIMITED",
+        "CLASS A", "CLASS B", "REGISTERED SHARES", "REG SHS", "SHARES",
+        "COMMON STOCK", "ORDINARY", "DR", "ADR", "CDR", "ETF", "ETC",
+        "INC", "CORP", "LTD", "PLC", "AG", "SA", "SE", "NV", "R",
+    ]
+    for token in cleanup_tokens:
+        raw = raw.replace(token, " ")
     return "".join(ch for ch in raw if ch.isalnum()) or str(item.get("symbol") or "").upper()
+
+
+def _clean_asset_name(name: str | None, symbol: str = "") -> str:
+    raw = " ".join(str(name or symbol or "").replace("\t", " ").split())
+    if not raw:
+        return str(symbol or "").upper()
+    noisy_suffixes = [
+        " R", " DR", " ADR", " CDR", " COMMON STOCK", " ORDINARY SHARES",
+        " REGISTERED SHARES", " REG SHS",
+    ]
+    upper = raw.upper()
+    for suffix in noisy_suffixes:
+        if upper.endswith(suffix):
+            raw = raw[: -len(suffix)].strip()
+            upper = raw.upper()
+    profile_name = SYMBOL_PROFILES.get(_base_logo_symbol(symbol))
+    if profile_name and (upper == symbol.upper() or len(raw) <= 6):
+        return profile_name
+    return raw
 
 
 def _search_tokens(value: str) -> list[str]:
@@ -627,6 +718,8 @@ def _relevance_rank(item: dict, query: str) -> int:
         1 for token in q_tokens
         if any(name_token == token or name_token.startswith(token) for name_token in name_tokens)
     )
+    if len(q_tokens) >= 2 and token_matches < len(q_tokens):
+        return 99
     if q_tokens and token_matches == len(q_tokens):
         return 3
     if len(q_tokens) >= 2 and token_matches >= math.ceil(len(q_tokens) * 0.75):
@@ -643,7 +736,9 @@ def _rank_and_dedupe_results(items: list[dict], limit: int, query: str = "") -> 
     for item in items:
         if not item.get("symbol"):
             continue
-        enriched = with_logo({**item, "currency": _search_currency(item)})
+        cleaned = {**item, "currency": _search_currency(item)}
+        cleaned["name"] = _clean_asset_name(cleaned.get("name"), str(cleaned.get("symbol") or ""))
+        enriched = with_logo(cleaned)
         if _relevance_rank(enriched, query) >= 99:
             continue
         key = _company_key(enriched)
@@ -696,43 +791,61 @@ def _search_symbols_yahoo(query: str = "", limit: int = 12) -> dict:
 
 
 def _twelve_search_results(clean: str, max_results: int) -> list[dict]:
-    payload = _twelve_get("symbol_search", {"symbol": clean, "outputsize": max_results * 3})
-    if not payload:
-        return []
-    raw_results = payload.get("data") if isinstance(payload, dict) else payload
-    if not isinstance(raw_results, list):
-        return []
+    query_attempts = [clean]
+    tokens = _search_tokens(clean)
+    if len(tokens) > 1:
+        query_attempts.extend(tokens)
+    compact = "".join(ch for ch in clean.upper() if ch.isalnum())
+    mapped = COMMON_SYMBOL_MAP.get(compact)
+    if mapped:
+        query_attempts.insert(0, mapped)
     results = []
-    for item in raw_results:
-        if not isinstance(item, dict):
+    seen_payloads: set[str] = set()
+    for attempt in query_attempts:
+        attempt_key = attempt.lower()
+        if attempt_key in seen_payloads:
             continue
-        symbol = str(item.get("symbol") or "").strip()
-        if not symbol:
+        seen_payloads.add(attempt_key)
+        payload = _twelve_get("symbol_search", {"symbol": attempt, "outputsize": max_results * 4})
+        if not payload:
             continue
-        name = item.get("instrument_name") or item.get("name") or symbol
-        exchange = item.get("exchange") or item.get("mic_code") or item.get("exchange_timezone") or ""
-        currency = item.get("currency") or ""
-        asset_type = item.get("instrument_type") or item.get("type") or ""
-        results.append(
-            with_logo(
-                {
-                    "symbol": symbol,
-                    "name": name,
-                    "exchange": exchange,
-                    "currency": currency,
-                    "type": asset_type,
-                    "source": "twelve_data",
-                }
+        raw_results = payload.get("data") if isinstance(payload, dict) else payload
+        if not isinstance(raw_results, list):
+            continue
+        for item in raw_results:
+            if not isinstance(item, dict):
+                continue
+            symbol = str(item.get("symbol") or "").strip()
+            if not symbol:
+                continue
+            name = _clean_asset_name(item.get("instrument_name") or item.get("name") or symbol, symbol)
+            exchange = item.get("exchange") or item.get("mic_code") or item.get("exchange_timezone") or ""
+            currency = item.get("currency") or ""
+            asset_type = item.get("instrument_type") or item.get("type") or ""
+            results.append(
+                with_logo(
+                    {
+                        "symbol": symbol,
+                        "name": name,
+                        "exchange": exchange,
+                        "currency": currency,
+                        "type": asset_type,
+                        "source": "twelve_data",
+                    }
+                )
             )
-        )
     return results
 
 
 def search_symbols(query: str = "", limit: int = 12) -> dict:
     clean = query.strip()
     max_results = max(1, min(limit, 20))
+    cache_key = f"symbols:{clean.lower()}:{max_results}"
+    cached = _cache_get(cache_key, CACHE_TTL_SECONDS["symbols"])
+    if cached is not None:
+        return cached
     if not clean:
-        return {"query": clean, "results": [with_logo(item) for item in POPULAR_SYMBOLS[:max_results]], "source": "popular"}
+        return _cache_set(cache_key, {"query": clean, "results": [with_logo(item) for item in POPULAR_SYMBOLS[:max_results]], "source": "popular", "cache_ttl_seconds": CACHE_TTL_SECONDS["symbols"]})
 
     fallback = [
         with_logo(item)
@@ -744,22 +857,29 @@ def search_symbols(query: str = "", limit: int = 12) -> dict:
         twelve_results = _twelve_search_results(clean, max_results)
         if twelve_results:
             ranked = _rank_and_dedupe_results(twelve_results + fallback, max_results, clean)
-            return {"query": clean, "results": ranked, "source": "twelve_data"}
+            if ranked:
+                return _cache_set(cache_key, {"query": clean, "results": ranked, "source": "twelve_data", "fallback_used": False, "cache_ttl_seconds": CACHE_TTL_SECONDS["symbols"]})
     except Exception as exc:
         twelve_error = str(exc)
     else:
         twelve_error = None
 
     yahoo = _search_symbols_yahoo(query, limit)
+    yahoo["fallback_used"] = True
+    yahoo["cache_ttl_seconds"] = CACHE_TTL_SECONDS["symbols"]
     if twelve_error:
         yahoo["twelve_data_error"] = twelve_error
-    return yahoo
+    return _cache_set(cache_key, yahoo)
 
 def get_fx_rate(base: str = "USD", quote: str = "EUR") -> dict:
     base_clean = base.strip().upper()
     quote_clean = quote.strip().upper()
+    cache_key = f"fx:{base_clean}:{quote_clean}"
+    cached = _cache_get(cache_key, 1800)
+    if cached is not None:
+        return cached
     if base_clean == quote_clean:
-        return {"base": base_clean, "quote": quote_clean, "rate": 1.0}
+        return _cache_set(cache_key, {"base": base_clean, "quote": quote_clean, "rate": 1.0})
 
     pair = f"{base_clean}{quote_clean}=X"
     data = yf.download(pair, period="5d", interval="1d", progress=False, threads=False)
@@ -769,21 +889,21 @@ def get_fx_rate(base: str = "USD", quote: str = "EUR") -> dict:
         inverse = normalize_yfinance_columns(inverse)
         latest = _safe_float(inverse["Close"].dropna().iloc[-1]) if not inverse.empty else None
         if latest:
-            return {"base": base_clean, "quote": quote_clean, "rate": 1 / latest}
+            return _cache_set(cache_key, {"base": base_clean, "quote": quote_clean, "rate": 1 / latest})
 
     if data.empty and base_clean == "EUR" and quote_clean == "USD":
         inverse = yf.download("EURUSD=X", period="5d", interval="1d", progress=False, threads=False)
         inverse = normalize_yfinance_columns(inverse)
         latest = _safe_float(inverse["Close"].dropna().iloc[-1]) if not inverse.empty else None
         if latest:
-            return {"base": base_clean, "quote": quote_clean, "rate": latest}
+            return _cache_set(cache_key, {"base": base_clean, "quote": quote_clean, "rate": latest})
 
     if data.empty:
         return {"base": base_clean, "quote": quote_clean, "rate": None, "error": "FX rate unavailable"}
 
     data = normalize_yfinance_columns(data)
     latest = _safe_float(data["Close"].dropna().iloc[-1])
-    return {"base": base_clean, "quote": quote_clean, "rate": latest}
+    return _cache_set(cache_key, {"base": base_clean, "quote": quote_clean, "rate": latest})
 
 
 def _safe_float(value) -> float | None:
@@ -867,15 +987,19 @@ def _get_chart_data_yahoo(symbol: str, range_key: str = "6M") -> dict:
     )
 
     if data.empty:
+        asset_name = get_asset_name(mapped_symbol)
         return {
             "symbol": symbol,
             "mapped_symbol": mapped_symbol,
-            "logo_url": get_logo_url(mapped_symbol, get_asset_name(mapped_symbol)),
+            "asset_name": asset_name,
+            "logo_url": get_logo_url(mapped_symbol, asset_name),
             "currency": quote_currency,
             "range": clean_range,
             "interval": interval,
             "candles": [],
-            "notes": ["No market data returned. Try a Yahoo Finance compatible symbol."],
+            "notes": [f"No chart data returned for {mapped_symbol} on {clean_range}. The symbol may be unsupported by the active provider or outside available history."],
+            "error": "chart_data_unavailable",
+            "user_message": f"Chart data unavailable for {mapped_symbol}. Try another exchange listing or timeframe.",
         }
 
     data = normalize_yfinance_columns(data)
@@ -914,12 +1038,14 @@ def _get_chart_data_yahoo(symbol: str, range_key: str = "6M") -> dict:
     return {
         "symbol": symbol,
         "mapped_symbol": mapped_symbol,
+        "asset_name": get_asset_name(mapped_symbol),
         "logo_url": get_logo_url(mapped_symbol, get_asset_name(mapped_symbol)),
         "currency": quote_currency,
         "range": clean_range,
         "interval": interval,
         "candles": candles,
         "notes": [],
+        "source": "yahoo",
     }
 
 
@@ -958,7 +1084,7 @@ def _get_technicals_yahoo(symbol: str, timeframe: str = "1d") -> TechnicalSnapsh
             logo_url=get_logo_url(mapped_symbol, asset_name),
             quote_currency=quote_currency,
             trend="unknown",
-            notes=["No market data returned. Try a Yahoo Finance compatible symbol."],
+            notes=[f"No technical data returned for {mapped_symbol} on {timeframe}. The symbol may be unsupported by the active provider or outside available history."],
         )
 
     data = normalize_yfinance_columns(data)
@@ -1069,7 +1195,7 @@ def _twelve_quote_currency(meta: dict, symbol: str) -> str:
 
 
 def _twelve_asset_name(meta: dict, mapped_symbol: str) -> str:
-    return str(meta.get("instrument_name") or meta.get("symbol") or SYMBOL_PROFILES.get(mapped_symbol.upper()) or mapped_symbol)
+    return _clean_asset_name(meta.get("instrument_name") or meta.get("name") or meta.get("symbol") or SYMBOL_PROFILES.get(mapped_symbol.upper()) or mapped_symbol, mapped_symbol)
 
 
 def _twelve_dataframe(payload: dict) -> pd.DataFrame:
@@ -1199,6 +1325,7 @@ def _chart_response_from_data(
 ) -> dict | None:
     if data.empty:
         return None
+    asset_name = get_asset_name(mapped_symbol)
     data = normalize_yfinance_columns(data)
     data = add_indicator_columns(data).tail(900)
     candles = []
@@ -1233,7 +1360,8 @@ def _chart_response_from_data(
     return {
         "symbol": symbol,
         "mapped_symbol": mapped_symbol,
-        "logo_url": get_logo_url(mapped_symbol, get_asset_name(mapped_symbol)),
+        "asset_name": asset_name,
+        "logo_url": get_logo_url(mapped_symbol, asset_name),
         "currency": quote_currency,
         "range": range_key,
         "interval": interval,
@@ -1246,6 +1374,11 @@ def _chart_response_from_data(
 def get_chart_data(symbol: str, range_key: str = "6M") -> dict:
     clean_range = range_key.strip().upper()
     mapped_symbol = map_symbol(symbol)
+    cache_key = f"chart:{mapped_symbol.upper()}:{clean_range}"
+    chart_ttl = CACHE_TTL_SECONDS["chart_intraday"] if clean_range in {"1D", "1W", "7D", "1M"} else CACHE_TTL_SECONDS["chart_daily"]
+    cached = _cache_get(cache_key, chart_ttl)
+    if cached is not None:
+        return cached
     td_interval, outputsize = TWELVE_CHART_RANGE_MAP.get(clean_range, TWELVE_CHART_RANGE_MAP["6M"])
     try:
         td_data, meta = _twelve_time_series(mapped_symbol, td_interval, outputsize)
@@ -1259,21 +1392,34 @@ def get_chart_data(symbol: str, range_key: str = "6M") -> dict:
             "twelve_data",
         )
         if response:
-            return response
+            response["cache_ttl_seconds"] = chart_ttl
+            return _cache_set(cache_key, response)
     except Exception as exc:
         fallback = _get_chart_data_yahoo(symbol, range_key)
         fallback.setdefault("notes", []).append(f"Twelve Data unavailable, using Yahoo fallback: {exc}")
         fallback["source"] = "yahoo_fallback"
-        return fallback
+        fallback["fallback_used"] = True
+        fallback["cache_ttl_seconds"] = chart_ttl
+        if not fallback.get("candles"):
+            fallback["user_message"] = f"No chart data available for {mapped_symbol} on {clean_range}. Twelve Data failed and Yahoo fallback returned no candles."
+        return _cache_set(cache_key, fallback)
     fallback = _get_chart_data_yahoo(symbol, range_key)
     fallback["source"] = "yahoo_fallback"
+    fallback["fallback_used"] = True
+    fallback["cache_ttl_seconds"] = chart_ttl
     fallback.setdefault("notes", []).append("Twelve Data unavailable or not configured, using Yahoo fallback.")
-    return fallback
+    if not fallback.get("candles"):
+        fallback["user_message"] = f"No chart data available for {mapped_symbol} on {clean_range}. Check the symbol, exchange suffix, or provider coverage."
+    return _cache_set(cache_key, fallback)
 
 
 def get_technicals(symbol: str, timeframe: str = "1d") -> TechnicalSnapshot:
     mapped_symbol = map_symbol(symbol)
     raw_timeframe = (timeframe or "1d").strip()
+    cache_key = f"technicals:{mapped_symbol.upper()}:{raw_timeframe}"
+    cached = _cache_get(cache_key, CACHE_TTL_SECONDS["technicals"])
+    if cached is not None:
+        return cached
     range_key = raw_timeframe.upper()
     uses_chart_range = range_key in CHART_RANGE_MAP and raw_timeframe != raw_timeframe.lower()
     if uses_chart_range:
@@ -1295,11 +1441,11 @@ def get_technicals(symbol: str, timeframe: str = "1d") -> TechnicalSnapshot:
             ["Data source: Twelve Data."],
         )
         if snapshot:
-            return snapshot
+            return _cache_set(cache_key, snapshot)
     except Exception as exc:
         snapshot = _get_technicals_yahoo(symbol, timeframe)
         snapshot.notes.append(f"Twelve Data unavailable, using Yahoo fallback: {exc}")
-        return snapshot
+        return _cache_set(cache_key, snapshot)
     snapshot = _get_technicals_yahoo(symbol, timeframe)
     snapshot.notes.append("Twelve Data unavailable or not configured, using Yahoo fallback.")
-    return snapshot
+    return _cache_set(cache_key, snapshot)
