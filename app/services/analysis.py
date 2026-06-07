@@ -418,7 +418,7 @@ def _fallback_ai_signal(technicals: TechnicalSnapshot, base: dict[str, Any]) -> 
 
 def _openai_ai_signal(technicals: TechnicalSnapshot, base: dict[str, Any]) -> AISignal | None:
     settings = get_settings()
-    if not settings.openai_api_key:
+    if not settings.openai_api_key or technicals.last_price is None:
         return None
 
     client = OpenAI(api_key=settings.openai_api_key)
@@ -438,6 +438,7 @@ def _openai_ai_signal(technicals: TechnicalSnapshot, base: dict[str, Any]) -> AI
         "\"timeframe_note\":\"timeframe-specific note\",\"not_financial_advice\":true}. "
         "Internally cover Trend, Momentum, Volume, Volatility, Risk, and Conclusion. "
         "Separate short-term momentum from long-term trend. Explain technical terms in beginner-friendly language without turning it into a tutorial. "
+        "If any market data field is null or unavailable, say it is unavailable; do not invent prices, earnings dates, indicators, or provider coverage. "
         "If you mention price, include the quote_currency code from the technicals data. "
         "Avoid buy now, sell now, and guaranteed profit. Make the summary timeframe-aware, concise, and professional.\n\n"
         f"DATA:\n{json.dumps(payload, indent=2)}"
