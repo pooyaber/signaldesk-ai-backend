@@ -56,7 +56,33 @@ FALLBACK_PROFILES = {
         "drivers": "Growth drivers include EV adoption, new models, energy storage growth, software features, autonomy development, and manufacturing efficiency.",
         "risks": "Key risks include EV competition, price cuts, margin pressure, execution risk, regulation, demand cyclicality, and high valuation sensitivity.",
     },
-    "SPY": {
+    "MU": {
+        "name": "Micron Technology, Inc.",
+        "sector": "Technology",
+        "industry": "Semiconductors",
+        "business": "Micron designs and manufactures memory and storage products, including DRAM, NAND, SSDs, and solutions used in data centers, PCs, mobile devices, automotive systems, and industrial applications.",
+        "competitive": "Micron competes in a cyclical but strategically important memory market, with scale, manufacturing capability, technology transitions, and customer relationships shaping its position.",
+        "drivers": "Key growth drivers include AI server memory demand, high-bandwidth memory adoption, data center upgrades, memory pricing cycles, and storage demand recovery.",
+        "risks": "Key risks include memory price cycles, capital intensity, supply-demand swings, competition, geopolitical exposure, and margin volatility.",
+    },
+    "DELL": {
+        "name": "Dell Technologies Inc.",
+        "sector": "Technology",
+        "industry": "Computer Hardware",
+        "business": "Dell sells PCs, servers, storage, networking, services, and enterprise infrastructure used by consumers, businesses, and data centers.",
+        "competitive": "Dell benefits from global scale, enterprise customer relationships, supply-chain execution, and exposure to AI server infrastructure demand.",
+        "drivers": "Growth drivers include AI server demand, enterprise infrastructure refresh cycles, services, storage modernization, and PC replacement cycles.",
+        "risks": "Key risks include hardware margin pressure, enterprise spending cycles, competition, component costs, and execution around AI infrastructure demand.",
+    },
+    "PLTR": {
+        "name": "Palantir Technologies Inc.",
+        "sector": "Technology",
+        "industry": "Software - Infrastructure",
+        "business": "Palantir provides data integration, analytics, AI, and decision-support platforms for government and commercial customers.",
+        "competitive": "Palantir has a differentiated position in complex data workflows, government contracts, and enterprise AI deployment, supported by high-touch implementation expertise.",
+        "drivers": "Growth drivers include AI platform adoption, commercial customer expansion, government demand, and broader enterprise use of operational AI.",
+        "risks": "Key risks include valuation sensitivity, contract concentration, long sales cycles, competition, and expectations around AI growth.",
+    },    "SPY": {
         "name": "SPDR S&P 500 ETF Trust",
         "sector": "ETF",
         "industry": "Broad Market ETF",
@@ -79,18 +105,18 @@ def _num(value: Any) -> float | None:
 
 def _fmt_pct(value: Any) -> str:
     n = _num(value)
-    return "Data unavailable" if n is None else f"{n * 100:.1f}%"
+    return "not included in the current feed" if n is None else f"{n * 100:.1f}%"
 
 
 def _fmt_multiple(value: Any) -> str:
     n = _num(value)
-    return "Data unavailable" if n is None else f"{n:.1f}x"
+    return "not included in the current feed" if n is None else f"{n:.1f}x"
 
 
 def _market_cap_category(market_cap: Any) -> str:
     value = _num(market_cap)
     if value is None:
-        return "Data unavailable"
+        return "Not classified by current feed"
     if value >= 200_000_000_000:
         return "Mega Cap"
     if value >= 10_000_000_000:
@@ -106,9 +132,9 @@ def _fallback_for(symbol: str, info: dict[str, Any]) -> dict[str, Any]:
         return FALLBACK_PROFILES[clean]
     return {
         "name": info.get("longName") or info.get("shortName") or symbol.upper(),
-        "sector": info.get("sector") or "Data unavailable",
-        "industry": info.get("industry") or "Data unavailable",
-        "business": "Detailed business description is unavailable from the current data source.",
+        "sector": info.get("sector") or "General market",
+        "industry": info.get("industry") or "Company research",
+        "business": "A detailed business description is not included in the current feed, so this section uses a broad research framework for the selected asset.",
         "competitive": "Competitive position data is limited. Review company filings, investor presentations, and industry comparisons for deeper context.",
         "drivers": "Growth drivers are not fully available from the current data source. Watch earnings, guidance, sector trends, and company-specific announcements.",
         "risks": "Risk data is limited. Consider valuation, competition, balance sheet strength, macroeconomic exposure, and execution risk.",
@@ -160,7 +186,7 @@ def _section(title: str, content: str) -> dict[str, str]:
     return {
         "title": title,
         "subtitle": SECTION_SUBTITLES[title],
-        "content": content or "Data unavailable. This is not financial advice.",
+        "content": content or "This section is limited by the current data feed. Use official filings, earnings releases, and investor-relations updates for confirmation. This is not financial advice.",
     }
 
 
@@ -194,7 +220,7 @@ def get_deep_analysis(symbol: str, currency: str = "USD", exchange: str | None =
         _section(
             "Financial Health",
             f"Revenue growth: {_fmt_pct(info.get('revenueGrowth'))}. Profit margin: {_fmt_pct(info.get('profitMargins'))}. "
-            f"Operating margin: {_fmt_pct(info.get('operatingMargins'))}. Free cash flow: {info.get('freeCashflow', 'Data unavailable')}. "
+            f"Operating margin: {_fmt_pct(info.get('operatingMargins'))}. Free cash flow: {info.get('freeCashflow', 'not included in the current feed')}. "
             "This helps show whether the business is growing profitably and funding itself. This is not financial advice.",
         ),
         _section(
@@ -211,16 +237,16 @@ def get_deep_analysis(symbol: str, currency: str = "USD", exchange: str | None =
         _section(
             "Risks",
             f"{fallback['risks']} "
-            f"Debt to equity: {info.get('debtToEquity', 'Data unavailable')}. This is not financial advice.",
+            f"Debt to equity: {info.get('debtToEquity', 'not included in the current feed')}. This is not financial advice.",
         ),
         _section(
             "Upcoming Catalysts",
-            f"Next earnings date: {info.get('earningsDate', 'Data unavailable')}. Watch earnings, guidance updates, product news, regulation, and sector news. "
+            f"Next earnings date is not included in the current feed. Watch the official investor-relations calendar, earnings guidance, product news, regulation, and sector news. "
             "This is not financial advice.",
         ),
         _section(
             "Market Sentiment",
-            f"Recommendation: {info.get('recommendationKey', 'Data unavailable')}. Analyst target mean: {info.get('targetMeanPrice', 'Data unavailable')}. "
+            f"Analyst recommendation: {info.get('recommendationKey', 'not included in the current feed')}. Analyst target mean: {info.get('targetMeanPrice', 'not included in the current feed')}. "
             "Sentiment can change quickly and should be checked against current news. This is not financial advice.",
         ),
         _section(
@@ -234,7 +260,7 @@ def get_deep_analysis(symbol: str, currency: str = "USD", exchange: str | None =
         "symbol": symbol.upper(),
         "mapped_symbol": mapped.upper(),
         "name": name,
-        "exchange": exchange or info.get("exchange") or info.get("fullExchangeName") or "Data unavailable",
+        "exchange": exchange or info.get("exchange") or info.get("fullExchangeName") or "Not provided",
         "currency": quote_currency,
         "asset_type": asset_type or info.get("quoteType") or "Equity",
         "sector": sector,

@@ -18,12 +18,24 @@ class AnalyzeRequest(BaseModel):
     symbol: str = Field(..., examples=["NVDA", "BTC-USD"])
     timeframe: str = Field(default="1d", examples=["1h", "4h", "1d"])
     include_ai: bool = True
+    display_currency: Literal["USD", "EUR"] = "USD"
 
 
 class ScanRequest(BaseModel):
     symbols: list[str] = Field(..., examples=[["NVDA", "AAPL", "MSFT", "BTC-USD"]])
     timeframe: str = "1d"
     include_ai: bool = False
+
+
+class AuthRegisterRequest(BaseModel):
+    email: str = Field(..., examples=["user@example.com"])
+    password: str = Field(..., min_length=8)
+    display_name: str | None = Field(default=None, examples=["Pooya"])
+
+
+class AuthLoginRequest(BaseModel):
+    email: str = Field(..., examples=["user@example.com"])
+    password: str = Field(..., min_length=1)
 
 
 class TechnicalSnapshot(BaseModel):

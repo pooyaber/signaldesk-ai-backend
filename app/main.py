@@ -24,12 +24,16 @@ except ImportError:
         password: str = Field(..., min_length=1)
 from app.security import verify_webhook_token
 from app.services.analysis import analyze_symbol
-from app.services.auth import login_user, logout_user, register_user, user_from_token
 from app.services.chart_render import render_chart_dashboard
 from app.services.deep_analysis import get_deep_analysis
 from app.services.market_data import cache_stats, get_chart_data, get_fx_rate, search_symbols
 from app.services.storage import init_db, list_signals, save_analysis
 from app.services.telegram import notify_analysis
+
+try:
+    from app.services.auth import login_user, logout_user, register_user, user_from_token
+except ImportError:
+    login_user = logout_user = register_user = user_from_token = None
 
 app = FastAPI(
     title="TradingView AI Backend",
@@ -122,21 +126,29 @@ def provider_status() -> dict:
 
 @app.post("/auth/register")
 def auth_register(req: AuthRegisterRequest) -> dict:
+    if register_user is None:
+        return {"error": "auth_unavailable", "detail": "Account login is not enabled on this backend deployment."}
     return register_user(email=req.email, password=req.password, display_name=req.display_name)
 
 
 @app.post("/auth/login")
 def auth_login(req: AuthLoginRequest) -> dict:
+    if login_user is None:
+        return {"error": "auth_unavailable", "detail": "Account login is not enabled on this backend deployment."}
     return login_user(email=req.email, password=req.password)
 
 
 @app.get("/auth/me")
 def auth_me(authorization: str | None = Header(default=None)) -> dict:
+    if user_from_token is None:
+        return {"user": None, "error": "auth_unavailable"}
     return {"user": user_from_token(authorization)}
 
 
 @app.post("/auth/logout")
 def auth_logout(authorization: str | None = Header(default=None)) -> dict:
+    if logout_user is None:
+        return {"ok": True, "error": "auth_unavailable"}
     return logout_user(authorization)
 
 
