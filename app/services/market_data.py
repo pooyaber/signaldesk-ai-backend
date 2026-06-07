@@ -86,6 +86,26 @@ def _cache_set(key: str, value):
     _MEMORY_CACHE[key] = (time.time(), value)
     return value
 
+
+def cache_stats() -> dict:
+    now = time.time()
+    by_prefix: dict[str, int] = {}
+    expired = 0
+    for key, (created_at, _value) in list(_MEMORY_CACHE.items()):
+        prefix = key.split(":", 1)[0]
+        by_prefix[prefix] = by_prefix.get(prefix, 0) + 1
+        ttl_key = "chart_daily" if prefix == "chart" else prefix
+        ttl = CACHE_TTL_SECONDS.get(ttl_key)
+        if ttl is not None and now - created_at > ttl:
+            expired += 1
+    return {
+        "items": len(_MEMORY_CACHE),
+        "max_items": MAX_CACHE_ITEMS,
+        "expired_items_waiting_cleanup": expired,
+        "by_prefix": by_prefix,
+        "ttl_seconds": CACHE_TTL_SECONDS,
+    }
+
 TWELVE_CHART_RANGE_MAP = {
     "1D": ("5min", 288),
     "1W": ("30min", 336),
@@ -1401,6 +1421,12 @@ def _chart_response_from_data(
         "candles": candles,
         "notes": [f"Data source: {source}."],
         "source": source,
+        "fallback_used": source != "twelve_data",
+        "provider": {
+            "primary": "twelve_data",
+            "actual": source,
+            "fallback_used": source != "twelve_data",
+        },
     }
 
 
@@ -1435,6 +1461,12 @@ def get_chart_data(symbol: str, range_key: str = "6M") -> dict:
         fallback["cache_ttl_seconds"] = chart_ttl
         if not fallback.get("candles"):
             fallback["user_message"] = f"No chart data available for {mapped_symbol} on {clean_range}. Twelve Data failed and Yahoo fallback returned no candles."
+        fallback["provider"] = {
+            "primary": "twelve_data",
+            "actual": "yahoo",
+            "fallback_used": True,
+            "twelve_data_error": str(exc),
+        }
         return _cache_set(cache_key, fallback)
     fallback = _get_chart_data_yahoo(symbol, range_key)
     fallback["source"] = "yahoo_fallback"
@@ -1443,6 +1475,12 @@ def get_chart_data(symbol: str, range_key: str = "6M") -> dict:
     fallback.setdefault("notes", []).append("Twelve Data unavailable or not configured, using Yahoo fallback.")
     if not fallback.get("candles"):
         fallback["user_message"] = f"No chart data available for {mapped_symbol} on {clean_range}. Check the symbol, exchange suffix, or provider coverage."
+    fallback["provider"] = {
+        "primary": "twelve_data",
+        "actual": "yahoo",
+        "fallback_used": True,
+        "twelve_data_error": "Twelve Data returned no usable candles or is not configured.",
+    }
     return _cache_set(cache_key, fallback)
 
 
