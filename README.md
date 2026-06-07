@@ -44,9 +44,12 @@ OPENAI_MODEL=gpt-4.1-mini
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 DATABASE_PATH=signals.db
+TWELVE_DATA_API_KEY=your_twelve_data_api_key_here
+RATE_LIMIT_PER_MINUTE=0
 ```
 
 If no OpenAI key is set, the backend still works with a rules-based score.
+If no Twelve Data key is set, the backend can still fall back to Yahoo where available. Set `RATE_LIMIT_PER_MINUTE` above `0` only when you want backend-side request limiting.
 
 ## Cloud deployment
 
@@ -78,6 +81,8 @@ OPENAI_MODEL=gpt-4.1-mini
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 DATABASE_PATH=/tmp/signals.db
+TWELVE_DATA_API_KEY=your_twelve_data_api_key_here
+RATE_LIMIT_PER_MINUTE=0
 ```
 
 ### Railway
