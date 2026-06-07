@@ -65,6 +65,7 @@ CACHE_TTL_SECONDS = {
     "fx": 3600,
 }
 MAX_CACHE_ITEMS = 600
+SEARCH_RANKING_VERSION = "2026-06-07-crypto-direct-v1"
 
 
 def _cache_get(key: str, ttl_seconds: int):
@@ -697,6 +698,11 @@ def _is_search_result_allowed(item: dict, query: str) -> bool:
     symbol = str(item.get("symbol") or "").strip()
     if not symbol:
         return False
+    preferred_symbol = COMMON_SYMBOL_MAP.get(_compact(raw).upper())
+    if preferred_symbol and preferred_symbol.endswith("-USD"):
+        symbol_upper = symbol.upper()
+        crypto_pair = preferred_symbol.replace("-USD", "/USD")
+        return symbol_upper in {preferred_symbol, crypto_pair}
     type_rank = _asset_type_rank(item)
     if type_rank < 99:
         return True
@@ -756,6 +762,10 @@ def _relevance_rank(item: dict, query: str) -> int:
     name_compact = _compact(name)
     q_tokens = _search_tokens(raw)
     name_tokens = _search_tokens(name)
+    preferred_symbol = COMMON_SYMBOL_MAP.get(q_compact.upper())
+
+    if preferred_symbol and symbol_compact == _compact(preferred_symbol):
+        return -1
 
     if symbol == raw.lower() or symbol_compact == q_compact:
         return 0
@@ -892,7 +902,7 @@ def _twelve_search_results(clean: str, max_results: int) -> list[dict]:
 def search_symbols(query: str = "", limit: int = 12) -> dict:
     clean = query.strip()
     max_results = max(1, min(limit, 20))
-    cache_key = f"symbols:{clean.lower()}:{max_results}"
+    cache_key = f"symbols:{SEARCH_RANKING_VERSION}:{clean.lower()}:{max_results}"
     cached = _cache_get(cache_key, CACHE_TTL_SECONDS["symbols"])
     if cached is not None:
         return cached
