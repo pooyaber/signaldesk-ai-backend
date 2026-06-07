@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 import time
@@ -8,7 +8,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.config import get_settings
-from app.models import AnalyzeRequest, AuthLoginRequest, AuthRegisterRequest, ScanRequest, TradingViewAlert
+from pydantic import BaseModel, Field
+
+from app.models import AnalyzeRequest, ScanRequest, TradingViewAlert
+try:
+    from app.models import AuthLoginRequest, AuthRegisterRequest
+except ImportError:
+    class AuthRegisterRequest(BaseModel):
+        email: str = Field(..., examples=["user@example.com"])
+        password: str = Field(..., min_length=8)
+        display_name: str | None = Field(default=None, examples=["Pooya"])
+
+    class AuthLoginRequest(BaseModel):
+        email: str = Field(..., examples=["user@example.com"])
+        password: str = Field(..., min_length=1)
 from app.security import verify_webhook_token
 from app.services.analysis import analyze_symbol
 from app.services.auth import login_user, logout_user, register_user, user_from_token
