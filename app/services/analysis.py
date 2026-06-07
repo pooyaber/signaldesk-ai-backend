@@ -1,13 +1,37 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from openai import OpenAI
 
 from app.config import get_settings
 from app.models import AISignal, AnalysisResult, TechnicalSnapshot
-from app.services.market_data import get_technicals
+from app.services.market_data import get_fx_rate, get_technicals
+
+_ANALYSIS_CACHE: dict[str, tuple[float, AnalysisResult]] = {}
+ANALYSIS_CACHE_TTL_SECONDS = 180
+
+
+def _analysis_cache_get(key: str) -> AnalysisResult | None:
+    item = _ANALYSIS_CACHE.get(key)
+    if not item:
+        return None
+    created_at, value = item
+    if time.time() - created_at > ANALYSIS_CACHE_TTL_SECONDS:
+        _ANALYSIS_CACHE.pop(key, None)
+        return None
+    return value
+
+
+def _analysis_cache_set(key: str, value: AnalysisResult) -> AnalysisResult:
+    if len(_ANALYSIS_CACHE) > 160:
+        oldest_keys = sorted(_ANALYSIS_CACHE, key=lambda item: _ANALYSIS_CACHE[item][0])[:40]
+        for old_key in oldest_keys:
+            _ANALYSIS_CACHE.pop(old_key, None)
+    _ANALYSIS_CACHE[key] = (time.time(), value)
+    return value
 
 
 def _round_level(value: float | None) -> float | None:
@@ -32,48 +56,87 @@ def rules_based_analysis(technicals: TechnicalSnapshot) -> dict[str, Any]:
     macd_hist = technicals.macd_histogram
     vol_ratio = technicals.volume_ratio20
     atr = technicals.atr14
+    performance = technicals.change_percent
 
     if technicals.trend == "bullish":
-        score += 20
-        reasons.append("Price is above EMA20, EMA50, and EMA200 with bullish EMA alignment.")
+        score += 14
+        reasons.append("Long-term trend remains constructive above key moving averages.")
     elif technicals.trend == "bearish":
-        score -= 20
-        reasons.append("Price is below EMA20, EMA50, and EMA200 with bearish EMA alignment.")
+        score -= 14
+        reasons.append("Trend structure is weak below key moving averages.")
     elif technicals.trend == "neutral":
         reasons.append("EMA structure is mixed, so trend confirmation is weak.")
 
+    if price is not None:
+        above_short = technicals.ema20 is not None and price >= technicals.ema20
+        above_mid = technicals.ema50 is not None and price >= technicals.ema50
+        above_long = technicals.ema200 is not None and price >= technicals.ema200
+        aligned_count = sum([above_short, above_mid, above_long])
+        score += (aligned_count - 1) * 4
+        if above_long and not above_short:
+            reasons.append("Short-term momentum softened while the broader structure remains above long-term trend support.")
+
     if rsi is not None:
-        if 50 <= rsi <= 65:
-            score += 10
+        if 45 <= rsi <= 55:
+            reasons.append("RSI is neutral and lacks strong momentum conviction.")
+        elif 55 < rsi <= 65:
+            score += 7
             reasons.append("RSI is in a healthy bullish momentum zone.")
         elif 65 < rsi <= 75:
-            score += 5
-            reasons.append("RSI is strong but getting extended.")
+            score += 3
+            reasons.append("RSI is strong but getting extended; the stock may pause after a fast move.")
         elif rsi > 75:
-            score -= 7
-            reasons.append("RSI is overextended; pullback risk is higher.")
-        elif 35 <= rsi < 50:
+            score -= 6
+            reasons.append("RSI is overextended; the stock may have risen too quickly and could pull back.")
+        elif 35 <= rsi < 45:
             score -= 5
-            reasons.append("RSI is below the bullish zone and momentum is weak.")
+            reasons.append("RSI shows weakening momentum but is not yet oversold.")
         elif rsi < 35:
-            score -= 10
-            reasons.append("RSI is oversold; trend may be weak, but bounce risk exists.")
+            score -= 8
+            reasons.append("RSI is oversold; trend may be weak, but a relief bounce is possible.")
 
     if macd_hist is not None:
         if macd_hist > 0:
-            score += 8
-            reasons.append("MACD histogram is positive, supporting bullish momentum.")
+            score += 6
+            reasons.append("MACD histogram is positive, which suggests momentum is improving.")
         elif macd_hist < 0:
-            score -= 8
-            reasons.append("MACD histogram is negative, supporting bearish momentum.")
+            score -= 6
+            reasons.append("MACD histogram is negative, which suggests momentum is weakening.")
+
+    if performance is not None:
+        if performance >= 20:
+            score += 5
+            reasons.append("Selected-timeframe performance is strongly positive, adding trend confirmation.")
+        elif performance >= 5:
+            score += 3
+            reasons.append("Selected-timeframe performance is positive, which supports the setup.")
+        elif performance <= -20:
+            score -= 5
+            reasons.append("Selected-timeframe performance is deeply negative, so recovery needs confirmation.")
+        elif performance <= -5:
+            score -= 3
+            reasons.append("Selected-timeframe performance is negative, which weakens the setup.")
 
     if vol_ratio is not None:
         if vol_ratio >= 1.5:
-            score += 8
-            reasons.append("Volume is significantly above the 20-period average.")
+            score += 6
+            reasons.append("Volume is significantly above average, showing stronger trader participation.")
         elif vol_ratio < 0.7:
-            score -= 4
-            reasons.append("Volume is below average, so conviction is weaker.")
+            score -= 5
+            reasons.append("Volume is below average, so the move currently has weaker trader participation.")
+
+    if technicals.bb_percent is not None:
+        if technicals.bb_percent > 1:
+            score -= 3
+            reasons.append("Price is stretched above the upper Bollinger range, increasing pullback risk.")
+        elif technicals.bb_percent > 0.8:
+            score -= 1
+            reasons.append("Price trades near the upper Bollinger range, so chasing strength carries more risk.")
+        elif 0.2 <= technicals.bb_percent <= 0.8:
+            reasons.append("Price remains inside neutral Bollinger positioning.")
+        elif technicals.bb_percent < 0:
+            score -= 3
+            reasons.append("Price is below the lower Bollinger range, confirming downside pressure but also possible oversold conditions.")
 
     if price is not None and atr is not None and price > 0:
         atr_percent = (atr / price) * 100
@@ -87,12 +150,12 @@ def rules_based_analysis(technicals: TechnicalSnapshot) -> dict[str, Any]:
 
     score = max(0, min(100, score))
 
-    if score >= 70:
+    if score >= 68:
         bias = "bullish"
         setup = "Bullish watchlist candidate"
-    elif score <= 35:
+    elif score <= 38:
         bias = "bearish"
-        setup = "Avoid or short-bias candidate"
+        setup = "Weak setup"
     else:
         bias = "neutral"
         setup = "Wait for confirmation"
@@ -127,13 +190,88 @@ def rules_based_analysis(technicals: TechnicalSnapshot) -> dict[str, Any]:
 
 
 def _timeframe_note(timeframe: str) -> str:
-    if timeframe in {"1m", "5m", "15m"}:
+    raw = timeframe or "1d"
+    tf = (timeframe or "1d").lower()
+    if tf in {"1m", "5m", "15m"} or raw == "1D":
         return "Intraday view focused on short-term movement; signals can change quickly."
-    if timeframe in {"1h", "4h"}:
+    if tf in {"1h", "4h"}:
         return "Swing momentum view focused on timing and short-term structure."
-    if timeframe == "1w":
+    if tf in {"1w", "5y", "max"}:
         return "Long-term structure view focused on major trend direction and broader risk."
+    if tf in {"1y"}:
+        return "One-year performance view focused on the broader trend, moving averages, and confirmation strength."
+    if tf in {"1m", "6m"}:
+        return "Multi-week to multi-month view focused on trend quality, momentum, and participation."
     return "Daily swing view focused on broader trend, moving averages, volume, and momentum."
+
+
+def _analysis_sections(technicals: TechnicalSnapshot, base: dict[str, Any]) -> dict[str, str]:
+    price = technicals.last_price
+    rsi = technicals.rsi14
+    macd_hist = technicals.macd_histogram
+    vol_ratio = technicals.volume_ratio20
+    bb = technicals.bb_percent
+    atr = technicals.atr14
+
+    trend = "Trend confirmation is mixed because price is not clearly aligned across short-, medium-, and long-term averages."
+    if price is not None:
+        above20 = technicals.ema20 is not None and price >= technicals.ema20
+        above50 = technicals.ema50 is not None and price >= technicals.ema50
+        above200 = technicals.ema200 is not None and price >= technicals.ema200
+        if above20 and above50 and above200:
+            trend = "Trend is constructive with price holding above EMA20, EMA50, and EMA200."
+        elif above50 and above200 and not above20:
+            trend = "Short-term trend softened below EMA20, while the broader trend remains constructive above EMA50 and EMA200."
+        elif not above50 and not above200:
+            trend = "Trend structure is weak because price is below important medium- and long-term averages."
+
+    momentum = "Momentum is unclear because RSI or MACD data is incomplete."
+    if rsi is not None:
+        if 45 <= rsi <= 55:
+            momentum = "RSI is neutral and lacks strong momentum conviction."
+        elif rsi > 70:
+            momentum = "RSI is overextended, meaning the asset may have moved too quickly and could pause or pull back."
+        elif rsi < 30:
+            momentum = "RSI is oversold, showing weak pressure but also possible bounce risk."
+        elif macd_hist is not None and macd_hist > 0:
+            momentum = "Momentum remains constructive with RSI outside the neutral zone and MACD histogram positive."
+        elif macd_hist is not None and macd_hist < 0:
+            momentum = "Momentum is weakening because MACD histogram is negative."
+
+    volume = "Volume confirmation is unclear."
+    if vol_ratio is not None:
+        if vol_ratio >= 1.2:
+            volume = "Volume is above average, which supports the move with stronger trader participation."
+        elif vol_ratio < 0.8:
+            volume = "Volume is below average, reducing confirmation because participation is weaker."
+        else:
+            volume = "Volume is close to average, giving only moderate confirmation."
+
+    volatility = "Volatility positioning is neutral."
+    if bb is not None:
+        if bb > 0.85:
+            volatility = "Price trades near the upper Bollinger range, so the setup may be stretched in the short term."
+        elif bb < 0.15:
+            volatility = "Price trades near the lower Bollinger range, showing downside pressure or possible oversold positioning."
+        else:
+            volatility = "Price remains inside neutral Bollinger positioning."
+    if price is not None and atr is not None and price > 0:
+        atr_percent = (atr / price) * 100
+        if atr_percent > 6:
+            volatility += " ATR is elevated, so price swings may be wider than usual."
+        elif atr_percent < 2:
+            volatility += " ATR is contained, suggesting calmer price movement."
+
+    risk = f"Risk is {base['risk']} based on volatility, momentum confirmation, and trend quality."
+    conclusion = f"Overall, this is a {base['bias']} setup with a {base['score']}/100 score; confirmation matters before relying on the signal."
+    return {
+        "trend": trend,
+        "momentum": momentum,
+        "volume": volume,
+        "volatility": volatility,
+        "risk": risk,
+        "conclusion": conclusion,
+    }
 
 
 def _traffic_light(technicals: TechnicalSnapshot, base: dict[str, Any]) -> str:
@@ -185,6 +323,43 @@ def _position_state(technicals: TechnicalSnapshot, base: dict[str, Any]) -> str:
     return "mixed consolidation"
 
 
+def _display_currency_snapshot(technicals: TechnicalSnapshot, display_currency: str | None) -> TechnicalSnapshot:
+    target = (display_currency or technicals.quote_currency or "USD").upper()
+    source = (technicals.quote_currency or "USD").upper()
+    if target == source:
+        return technicals
+
+    fx = get_fx_rate(source, target)
+    rate = fx.get("rate") if isinstance(fx, dict) else None
+    if rate in (None, 0):
+        return technicals
+
+    monetary_fields = [
+        "last_price",
+        "previous_close",
+        "change_absolute",
+        "ema20",
+        "ema50",
+        "ema200",
+        "sma20",
+        "sma50",
+        "sma200",
+        "bb_middle",
+        "bb_upper",
+        "bb_lower",
+        "bb_width",
+        "macd",
+        "macd_signal",
+        "macd_histogram",
+        "atr14",
+    ]
+    updates = {"quote_currency": target}
+    for field in monetary_fields:
+        value = getattr(technicals, field, None)
+        updates[field] = value * rate if value is not None else None
+    return technicals.model_copy(update=updates)
+
+
 def _fallback_ai_signal(technicals: TechnicalSnapshot, base: dict[str, Any]) -> AISignal:
     symbol = technicals.symbol.upper()
     timeframe = technicals.timeframe
@@ -195,19 +370,39 @@ def _fallback_ai_signal(technicals: TechnicalSnapshot, base: dict[str, Any]) -> 
     price_text = f"{currency} {technicals.last_price:.2f}" if technicals.last_price is not None else "unavailable"
     change_text = f"{technicals.change_percent:.2f}%" if technicals.change_percent is not None else "unavailable"
     rsi_text = f"{technicals.rsi14:.1f}" if technicals.rsi14 is not None else "unavailable"
-    macd_text = "positive" if (technicals.macd_histogram or 0) > 0 else "negative" if technicals.macd_histogram is not None else "unclear"
-    volume_text = "above average" if (technicals.volume_ratio20 or 0) >= 1 else "below average" if technicals.volume_ratio20 is not None else "unclear"
+    sections = _analysis_sections(technicals, base)
     tf_note = _timeframe_note(timeframe)
     position_state = _position_state(technicals, base)
     traffic_light = _traffic_light(technicals, base)
     confidence = _confidence(technicals, base)
     article = "an" if position_state[:1].lower() in {"a", "e", "i", "o", "u"} else "a"
 
+    if technicals.last_price is None:
+        provider_note = " ".join(technicals.notes or [])
+        summary = (
+            f"Market data is unavailable for {symbol} on the selected {timeframe} timeframe. "
+            "The backend could not build a reliable technical view from the current provider response. "
+            "Try another exchange listing, a different timeframe, or check provider coverage. "
+            f"{provider_note} Not financial advice."
+        ).strip()
+        return AISignal(
+            ai_summary=summary,
+            traffic_light="orange",
+            confidence="low",
+            position_state="mixed consolidation",
+            main_reasons=[
+                "Latest price data is unavailable.",
+                "Technical indicators cannot be trusted without candles.",
+                "Try another listing or timeframe.",
+            ],
+            timeframe_note=_timeframe_note(timeframe),
+            not_financial_advice=True,
+        )
+
     summary = (
         f"{symbol} shows a {tf_note.lower()} Latest quote is near {price_text} with change at {change_text}. "
-        f"The setup is currently {bias} with a {score}/100 score, RSI near {rsi_text}, MACD momentum {macd_text}, "
-        f"and volume {volume_text}. Risk is {risk}, so this looks like {article} {position_state} setup that should be watched "
-        f"for confirmation rather than treated as a direct trade instruction. Not financial advice."
+        f"{sections['trend']} {sections['momentum']} {sections['volume']} {sections['volatility']} "
+        f"{sections['conclusion']} This looks like {article} {position_state} setup with {risk} risk. Not financial advice."
     )
 
     return AISignal(
@@ -215,7 +410,7 @@ def _fallback_ai_signal(technicals: TechnicalSnapshot, base: dict[str, Any]) -> 
         traffic_light=traffic_light,
         confidence=confidence,
         position_state=position_state,
-        main_reasons=base["reasons"][:3],
+        main_reasons=[sections["trend"], sections["momentum"], sections["volume"]][:3],
         timeframe_note=tf_note,
         not_financial_advice=True,
     )
@@ -241,8 +436,10 @@ def _openai_ai_signal(technicals: TechnicalSnapshot, base: dict[str, Any]) -> AI
         "\"position_state\":\"bullish continuation|mixed consolidation|bearish pressure|overextended|recovery attempt|weak momentum|trend reversal attempt\","
         "\"main_reasons\":[\"reason 1\",\"reason 2\",\"reason 3\"],"
         "\"timeframe_note\":\"timeframe-specific note\",\"not_financial_advice\":true}. "
+        "Internally cover Trend, Momentum, Volume, Volatility, Risk, and Conclusion. "
+        "Separate short-term momentum from long-term trend. Explain technical terms in beginner-friendly language without turning it into a tutorial. "
         "If you mention price, include the quote_currency code from the technicals data. "
-        "Avoid buy now, sell now, and guaranteed profit. Make the summary timeframe-aware.\n\n"
+        "Avoid buy now, sell now, and guaranteed profit. Make the summary timeframe-aware, concise, and professional.\n\n"
         f"DATA:\n{json.dumps(payload, indent=2)}"
     )
 
@@ -263,17 +460,22 @@ def _openai_ai_signal(technicals: TechnicalSnapshot, base: dict[str, Any]) -> AI
         return None
 
 
-def analyze_symbol(symbol: str, timeframe: str = "1d", include_ai: bool = True) -> AnalysisResult:
+def analyze_symbol(symbol: str, timeframe: str = "1d", include_ai: bool = True, display_currency: str | None = None) -> AnalysisResult:
+    cache_key = f"{symbol.strip().upper()}:{timeframe}:{(display_currency or '').upper()}:{include_ai}"
+    cached = _analysis_cache_get(cache_key)
+    if cached is not None:
+        return cached
     technicals = get_technicals(symbol=symbol, timeframe=timeframe)
-    base = rules_based_analysis(technicals)
-    ai_signal = _openai_ai_signal(technicals, base) if include_ai else None
+    display_technicals = _display_currency_snapshot(technicals, display_currency)
+    base = rules_based_analysis(display_technicals)
+    ai_signal = _openai_ai_signal(display_technicals, base) if include_ai else None
     if ai_signal is None:
-        ai_signal = _fallback_ai_signal(technicals, base)
+        ai_signal = _fallback_ai_signal(display_technicals, base)
 
-    return AnalysisResult(
+    return _analysis_cache_set(cache_key, AnalysisResult(
         symbol=symbol,
         timeframe=timeframe,
-        logo_url=technicals.logo_url,
+        logo_url=display_technicals.logo_url,
         score=base["score"],
         risk=base["risk"],
         bias=base["bias"],
@@ -281,7 +483,7 @@ def analyze_symbol(symbol: str, timeframe: str = "1d", include_ai: bool = True) 
         reasons=base["reasons"],
         invalidation_level=base["invalidation_level"],
         watch_levels=base["watch_levels"],
-        technicals=technicals,
+        technicals=display_technicals,
         ai_commentary=ai_signal.ai_summary,
         ai_signal=ai_signal,
-    )
+    ))
