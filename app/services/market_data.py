@@ -667,7 +667,7 @@ def _asset_type_rank(item: dict) -> int:
         return 2
     if any(token in raw_type for token in ["COMMODITY", "FUTURE"]):
         return 3
-    if any(token in raw_type for token in ["WARRANT", "CERTIFICATE", "OPTION", "TURBO", "KNOCK", "BOND", "NOTE", "RIGHT"]):
+    if any(token in raw_type for token in ["WARRANT", "CERTIFICATE", "OPTION", "TURBO", "KNOCK", "BOND", "NOTE", "RIGHT", "DEPOSITARY RECEIPT"]):
         return 99
     return 5
 
