@@ -188,8 +188,15 @@ async def tradingview_webhook(
 
 
 @app.post("/analyze")
-def analyze(req: AnalyzeRequest) -> dict:
-    result = analyze_symbol(req.symbol, req.timeframe, include_ai=req.include_ai, display_currency=req.display_currency)
+def analyze(req: AnalyzeRequest, force_refresh: bool = Query(default=False)) -> dict:
+    refresh = bool(req.force_refresh or force_refresh)
+    result = analyze_symbol(
+        req.symbol,
+        req.timeframe,
+        include_ai=req.include_ai,
+        display_currency=req.display_currency,
+        force_refresh=refresh,
+    )
     technicals = result.technicals
     if technicals.last_price is None:
         logger.warning(
@@ -230,8 +237,8 @@ def recent_signals(limit: int = 50, symbol: str | None = None) -> dict:
 
 
 @app.get("/chart")
-def chart(symbol: str = "AAPL", range: str = "6M") -> dict:
-    result = get_chart_data(symbol=symbol, range_key=range)
+def chart(symbol: str = "AAPL", range: str = "6M", force_refresh: bool = Query(default=False)) -> dict:
+    result = get_chart_data(symbol=symbol, range_key=range, force_refresh=force_refresh)
     if not result.get("points"):
         logger.warning("chart_empty symbol=%s range=%s", symbol, range)
     return result

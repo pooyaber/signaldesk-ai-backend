@@ -19,6 +19,7 @@ class AnalyzeRequest(BaseModel):
     timeframe: str = Field(default="1d", examples=["1h", "4h", "1d"])
     include_ai: bool = True
     display_currency: Literal["USD", "EUR"] = "USD"
+    force_refresh: bool = False
 
 
 class ScanRequest(BaseModel):
