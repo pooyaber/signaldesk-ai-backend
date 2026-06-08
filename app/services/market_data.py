@@ -1440,12 +1440,12 @@ def _chart_response_from_data(
     }
 
 
-def get_chart_data(symbol: str, range_key: str = "6M") -> dict:
+def get_chart_data(symbol: str, range_key: str = "6M", force_refresh: bool = False) -> dict:
     clean_range = range_key.strip().upper()
     mapped_symbol = map_symbol(symbol)
     cache_key = f"chart:{mapped_symbol.upper()}:{clean_range}"
     chart_ttl = CACHE_TTL_SECONDS["chart_intraday"] if clean_range in {"1D", "1W", "7D", "1M"} else CACHE_TTL_SECONDS["chart_daily"]
-    cached = _cache_get(cache_key, chart_ttl)
+    cached = None if force_refresh else _cache_get(cache_key, chart_ttl)
     if cached is not None:
         return cached
     td_interval, outputsize = TWELVE_CHART_RANGE_MAP.get(clean_range, TWELVE_CHART_RANGE_MAP["6M"])
@@ -1494,11 +1494,11 @@ def get_chart_data(symbol: str, range_key: str = "6M") -> dict:
     return _cache_set(cache_key, fallback)
 
 
-def get_technicals(symbol: str, timeframe: str = "1d") -> TechnicalSnapshot:
+def get_technicals(symbol: str, timeframe: str = "1d", force_refresh: bool = False) -> TechnicalSnapshot:
     mapped_symbol = map_symbol(symbol)
     raw_timeframe = (timeframe or "1d").strip()
     cache_key = f"technicals:{mapped_symbol.upper()}:{raw_timeframe}"
-    cached = _cache_get(cache_key, CACHE_TTL_SECONDS["technicals"])
+    cached = None if force_refresh else _cache_get(cache_key, CACHE_TTL_SECONDS["technicals"])
     if cached is not None:
         return cached
     range_key = raw_timeframe.upper()

@@ -461,12 +461,12 @@ def _openai_ai_signal(technicals: TechnicalSnapshot, base: dict[str, Any]) -> AI
         return None
 
 
-def analyze_symbol(symbol: str, timeframe: str = "1d", include_ai: bool = True, display_currency: str | None = None) -> AnalysisResult:
+def analyze_symbol(symbol: str, timeframe: str = "1d", include_ai: bool = True, display_currency: str | None = None, force_refresh: bool = False) -> AnalysisResult:
     cache_key = f"{symbol.strip().upper()}:{timeframe}:{(display_currency or '').upper()}:{include_ai}"
-    cached = _analysis_cache_get(cache_key)
+    cached = None if force_refresh else _analysis_cache_get(cache_key)
     if cached is not None:
         return cached
-    technicals = get_technicals(symbol=symbol, timeframe=timeframe)
+    technicals = get_technicals(symbol=symbol, timeframe=timeframe, force_refresh=force_refresh)
     display_technicals = _display_currency_snapshot(technicals, display_currency)
     base = rules_based_analysis(display_technicals)
     ai_signal = _openai_ai_signal(display_technicals, base) if include_ai else None
