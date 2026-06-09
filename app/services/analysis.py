@@ -8,7 +8,7 @@ from openai import OpenAI
 
 from app.config import get_settings
 from app.models import AISignal, AnalysisResult, TechnicalSnapshot
-from app.services.market_data import get_fx_rate, get_technicals
+from app.services.market_data import canonical_analysis_timeframe, get_fx_rate, get_technicals
 
 _ANALYSIS_CACHE: dict[str, tuple[float, AnalysisResult]] = {}
 ANALYSIS_CACHE_TTL_SECONDS = 180
@@ -462,11 +462,12 @@ def _openai_ai_signal(technicals: TechnicalSnapshot, base: dict[str, Any]) -> AI
 
 
 def analyze_symbol(symbol: str, timeframe: str = "1d", include_ai: bool = True, display_currency: str | None = None, force_refresh: bool = False) -> AnalysisResult:
-    cache_key = f"{symbol.strip().upper()}:{timeframe}:{(display_currency or '').upper()}:{include_ai}"
+    normalized_timeframe = canonical_analysis_timeframe(timeframe)
+    cache_key = f"{symbol.strip().upper()}:{normalized_timeframe}:{(display_currency or '').upper()}:{include_ai}"
     cached = None if force_refresh else _analysis_cache_get(cache_key)
     if cached is not None:
         return cached
-    technicals = get_technicals(symbol=symbol, timeframe=timeframe, force_refresh=force_refresh)
+    technicals = get_technicals(symbol=symbol, timeframe=normalized_timeframe, force_refresh=force_refresh)
     display_technicals = _display_currency_snapshot(technicals, display_currency)
     base = rules_based_analysis(display_technicals)
     ai_signal = _openai_ai_signal(display_technicals, base) if include_ai else None
@@ -475,7 +476,7 @@ def analyze_symbol(symbol: str, timeframe: str = "1d", include_ai: bool = True, 
 
     return _analysis_cache_set(cache_key, AnalysisResult(
         symbol=symbol,
-        timeframe=timeframe,
+        timeframe=normalized_timeframe,
         logo_url=display_technicals.logo_url,
         score=base["score"],
         risk=base["risk"],

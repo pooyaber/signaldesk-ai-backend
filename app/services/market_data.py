@@ -68,6 +68,13 @@ MAX_CACHE_ITEMS = 600
 SEARCH_RANKING_VERSION = "2026-06-07-crypto-direct-v1"
 
 
+def canonical_analysis_timeframe(timeframe: str | None) -> str:
+    value = (timeframe or "1d").strip()
+    if value.upper() == "1D":
+        return "1d"
+    return value
+
+
 def _cache_get(key: str, ttl_seconds: int):
     item = _MEMORY_CACHE.get(key)
     if not item:
@@ -1148,9 +1155,9 @@ def _get_chart_data_yahoo(symbol: str, range_key: str = "6M") -> dict:
 
 def _get_technicals_yahoo(symbol: str, timeframe: str = "1d") -> TechnicalSnapshot:
     mapped_symbol = map_symbol(symbol)
-    raw_timeframe = (timeframe or "1d").strip()
+    raw_timeframe = canonical_analysis_timeframe(timeframe)
     range_key = raw_timeframe.upper()
-    uses_chart_range = range_key in CHART_RANGE_MAP and raw_timeframe != raw_timeframe.lower()
+    uses_chart_range = range_key in CHART_RANGE_MAP and raw_timeframe != raw_timeframe.lower() and range_key != "1D"
     if uses_chart_range:
         period, interval = CHART_RANGE_MAP[range_key]
     else:
@@ -1532,13 +1539,13 @@ def get_chart_data(symbol: str, range_key: str = "6M", force_refresh: bool = Fal
 
 def get_technicals(symbol: str, timeframe: str = "1d", force_refresh: bool = False) -> TechnicalSnapshot:
     mapped_symbol = map_symbol(symbol)
-    raw_timeframe = (timeframe or "1d").strip()
+    raw_timeframe = canonical_analysis_timeframe(timeframe)
     cache_key = f"technicals:{mapped_symbol.upper()}:{raw_timeframe}"
     cached = None if force_refresh else _cache_get(cache_key, CACHE_TTL_SECONDS["technicals"])
     if cached is not None:
         return cached
     range_key = raw_timeframe.upper()
-    uses_chart_range = range_key in CHART_RANGE_MAP and raw_timeframe != raw_timeframe.lower()
+    uses_chart_range = range_key in CHART_RANGE_MAP and raw_timeframe != raw_timeframe.lower() and range_key != "1D"
     if uses_chart_range:
         td_interval, outputsize = TWELVE_CHART_RANGE_MAP.get(range_key, TWELVE_CHART_RANGE_MAP["6M"])
         response_timeframe = range_key
