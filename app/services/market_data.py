@@ -1034,6 +1034,40 @@ def normalize_yfinance_columns(data: pd.DataFrame) -> pd.DataFrame:
     return data
 
 
+def trim_data_to_range(data: pd.DataFrame, range_key: str) -> pd.DataFrame:
+    """Trim provider output to the selected display range.
+
+    Twelve Data returns a count of candles, not a strict calendar range. For
+    market-hours assets this can make 1D look like several days and 1W look
+    closer to a month unless we trim after fetching.
+    """
+    if data.empty:
+        return data
+    clean_range = (range_key or "").strip().upper()
+    if clean_range in {"", "MAX", "ALL"}:
+        return data.sort_index()
+    sorted_data = data.sort_index()
+    latest = sorted_data.index.max()
+    if pd.isna(latest):
+        return sorted_data
+    if clean_range == "1D":
+        cutoff = latest - pd.Timedelta(days=1)
+    elif clean_range in {"1W", "7D"}:
+        cutoff = latest - pd.Timedelta(days=7)
+    elif clean_range == "1M":
+        cutoff = latest - pd.DateOffset(months=1)
+    elif clean_range == "6M":
+        cutoff = latest - pd.DateOffset(months=6)
+    elif clean_range == "1Y":
+        cutoff = latest - pd.DateOffset(years=1)
+    elif clean_range == "5Y":
+        cutoff = latest - pd.DateOffset(years=5)
+    else:
+        return sorted_data
+    trimmed = sorted_data[sorted_data.index >= cutoff]
+    return trimmed if len(trimmed) >= 2 else sorted_data
+
+
 def _get_chart_data_yahoo(symbol: str, range_key: str = "6M") -> dict:
     clean_range = range_key.strip().upper()
     period, interval = CHART_RANGE_MAP.get(clean_range, CHART_RANGE_MAP["6M"])
@@ -1151,12 +1185,12 @@ def _get_technicals_yahoo(symbol: str, timeframe: str = "1d") -> TechnicalSnapsh
         )
 
     data = normalize_yfinance_columns(data)
-
     data = add_indicator_columns(data)
 
     latest = data.iloc[-1]
     previous = data.iloc[-2] if len(data) >= 2 else latest
-    range_start = data.iloc[0] if uses_chart_range else previous
+    range_data = trim_data_to_range(data, range_key) if uses_chart_range else data
+    range_start = range_data.iloc[0] if uses_chart_range and not range_data.empty else previous
 
     last_price = _safe_float(latest.get("Close"))
     previous_close = _safe_float(previous.get("Close"))
@@ -1323,7 +1357,8 @@ def _technical_snapshot_from_data(
     data = add_indicator_columns(data)
     latest = data.iloc[-1]
     previous = data.iloc[-2] if len(data) >= 2 else latest
-    range_start = data.iloc[0] if uses_chart_range else previous
+    range_data = trim_data_to_range(data, timeframe) if uses_chart_range else data
+    range_start = range_data.iloc[0] if uses_chart_range and not range_data.empty else previous
     last_price = _safe_float(latest.get("Close"))
     previous_close = _safe_float(previous.get("Close"))
     performance_start_close = _safe_float(range_start.get("Close"))
@@ -1390,7 +1425,8 @@ def _chart_response_from_data(
         return None
     asset_name = get_asset_name(mapped_symbol)
     data = normalize_yfinance_columns(data)
-    data = add_indicator_columns(data).tail(900)
+    data = add_indicator_columns(data)
+    data = trim_data_to_range(data, range_key).tail(900)
     candles = []
     for index, row in data.iterrows():
         timestamp = index.isoformat()
